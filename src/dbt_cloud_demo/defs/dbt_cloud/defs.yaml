@@ -1,0 +1,51 @@
+# This configuration uses DEMO MODE by default for local testing.
+# To use real dbt Cloud, set demo_mode: false and uncomment the cloud credentials below.
+
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
+attributes:
+  # Demo mode - runs dbt locally with DuckDB (no cloud credentials needed)
+  demo_mode: true  # Set to false when you have real dbt Cloud credentials
+
+  # Cloud credentials (not used in demo mode)
+  account_id: 0
+  project_id: 0
+  environment_id: 0
+  access_url: "https://cloud.getdbt.com"
+  token: ""
+
+  # === UNCOMMENT BELOW FOR REAL DBT CLOUD MODE ===
+  # demo_mode: false
+  # account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  # access_url: "{{ env.DBT_CLOUD_URL }}"
+  # token: "{{ env.DBT_CLOUD_TOKEN }}"
+  # project_id: "{{ env.DBT_CLOUD_PROJECT_ID }}"
+  # environment_id: "{{ env.DBT_CLOUD_ENVIRONMENT_ID }}"
+
+  # Translation function
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
+
+  # Automation condition configuration
+  # Options: "none", "eager", "on_missing", "cron", "on_cron"
+  automation_condition_type: "eager"  # Default for all assets
+
+  # How often to check automation conditions (in seconds, minimum 5)
+  # Lower = faster response, higher = less resource usage
+  automation_sensor_minimum_interval_seconds: 5  # Check every 5 seconds
+
+  # Override automation conditions for specific assets
+  # Example: Set different conditions for specific models
+  # automation_condition_overrides:
+  #   - asset_keys: ["customers", "order_metrics"]  # Marts use on_missing
+  #     condition_type: "on_missing"
+  #   - asset_keys: ["stg_customers"]  # This staging model runs on cron
+  #     condition_type: "cron"
+  #     cron_schedule: "*/10 * * * *"  # Every 10 minutes (UTC timezone)
+  # Set to empty list to use default automation for all:
+  # automation_condition_overrides: []
+  # Note: Cron schedules use UTC timezone by default in Dagster
+
+  # Observable asset dependencies
+  has_observable_deps: false
+  observable_dep_keys: []

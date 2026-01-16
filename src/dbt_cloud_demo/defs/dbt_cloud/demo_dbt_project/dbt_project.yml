@@ -1,0 +1,25 @@
+name: 'dbt_demo_project'
+version: '1.0.0'
+config-version: 2
+
+profile: 'demo_duckdb'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  dbt_demo_project:
+    staging:
+      +materialized: view
+      +tags: ["staging"]
+    marts:
+      +materialized: table
+      +tags: ["marts"]
+
+seeds:
+  dbt_demo_project:
+    +schema: raw
