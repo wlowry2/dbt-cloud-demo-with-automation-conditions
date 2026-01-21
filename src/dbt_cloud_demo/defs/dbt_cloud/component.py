@@ -183,10 +183,6 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
     automation_sensor_minimum_interval_seconds: int = 5  # How often to evaluate automation conditions (minimum 5 seconds)
     automation_condition_overrides: list[AutomationConditionOverride] = []  # Override automation for specific assets
 
-    # Observable asset dependency configuration
-    has_observable_deps: bool = False  # Flag to indicate external/observable asset dependencies
-    observable_dep_keys: list[str] = []  # Asset keys of observable dependencies (e.g., ["my_external_asset"])
-
     def _get_demo_project_path(self) -> Path:
         """Get the path to the bundled demo dbt project."""
         return Path(__file__).parent / "demo_dbt_project"
@@ -247,18 +243,11 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
             automation_condition_overrides=self.automation_condition_overrides
         )
 
-        # Build observable asset dependencies
-        deps = None
-        if self.has_observable_deps and self.observable_dep_keys:
-            # Convert string keys to AssetKey objects
-            deps = [dg.AssetKey.from_user_string(key) for key in self.observable_dep_keys]
-
         # Create dbt Cloud assets that can be materialized
         @dbt_cloud_assets(
             workspace=workspace,
             dagster_dbt_translator=translator,
             name="dbt_cloud_orchestrated_assets",
-            deps=deps,
         )
         def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext, dbt_cloud: DbtCloudWorkspace):
             """Materializable dbt Cloud assets triggered by Dagster."""
@@ -306,34 +295,17 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
             automation_condition_overrides=self.automation_condition_overrides
         )
 
-        # Build observable asset dependencies (for deps parameter if supported)
-        deps = None
-        if self.has_observable_deps and self.observable_dep_keys:
-            deps = [dg.AssetKey.from_user_string(key) for key in self.observable_dep_keys]
-
         # Create local dbt assets
         # Automation condition is applied via the translator's get_automation_condition() method
-        if deps is not None:
-            @dbt_assets(
-                manifest=dbt_project.manifest_path,
-                dagster_dbt_translator=translator,
-                name="dbt_demo_assets",
-                project=dbt_project,
-                deps=deps,
-            )
-            def dbt_demo_assets(context: dg.AssetExecutionContext, dbt: DbtCliResource):
-                """Demo dbt assets running locally with DuckDB."""
-                yield from dbt.cli(["build"], context=context).stream()
-        else:
-            @dbt_assets(
-                manifest=dbt_project.manifest_path,
-                dagster_dbt_translator=translator,
-                name="dbt_demo_assets",
-                project=dbt_project,
-            )
-            def dbt_demo_assets(context: dg.AssetExecutionContext, dbt: DbtCliResource):
-                """Demo dbt assets running locally with DuckDB."""
-                yield from dbt.cli(["build"], context=context).stream()
+        @dbt_assets(
+            manifest=dbt_project.manifest_path,
+            dagster_dbt_translator=translator,
+            name="dbt_demo_assets",
+            project=dbt_project,
+        )
+        def dbt_demo_assets(context: dg.AssetExecutionContext, dbt: DbtCliResource):
+            """Demo dbt assets running locally with DuckDB."""
+            yield from dbt.cli(["build"], context=context).stream()
 
         # Create DbtCliResource for local execution
         dbt_resource = DbtCliResource(project_dir=dbt_project)
