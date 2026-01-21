@@ -258,7 +258,6 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
             workspace=workspace,
             dagster_dbt_translator=translator,
             name="dbt_cloud_orchestrated_assets",
-            automation_condition=automation_condition,
             deps=deps,
         )
         def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext, dbt_cloud: DbtCloudWorkspace):
