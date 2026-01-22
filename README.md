@@ -121,50 +121,205 @@ raw/payments   ─→ dbt_orchestrated/staging/stg_payments   ─┤            
 
 ## Connecting to Real dbt Cloud
 
-To connect to an actual dbt Cloud account, update the component YAML files:
+### Single Project Configuration
 
-### For Observability:
-
-Edit `src/dbt_cloud_demo/defs/dbt_cloud_observability/defs.yaml`:
+For a single dbt Cloud project, update `defs.yaml`:
 
 ```yaml
-type: dbt_cloud_demo.defs.dbt_cloud_observability.component.DbtCloudObservabilityComponent
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
 attributes:
+  # Component identity
+  resource_key: "dbt_cloud"  # Unique resource identifier
+  asset_key_prefix: []  # Optional: namespace assets (e.g., ["production"])
+
+  # Connection settings
   demo_mode: false
-  account_id: "${DBT_CLOUD_ACCOUNT_ID}"
-  access_url: "https://cloud.getdbt.com"
-  token: "${DBT_CLOUD_TOKEN}"
-  project_id: "${DBT_CLOUD_PROJECT_ID}"
-  environment_id: "${DBT_CLOUD_ENVIRONMENT_ID}"
-```
+  account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
+  token: "{{ env.DBT_CLOUD_TOKEN }}"
+  project_id: "{{ env.DBT_CLOUD_PROJECT_ID }}"
+  environment_id: "{{ env.DBT_CLOUD_ENVIRONMENT_ID }}"
 
-### For Orchestration:
+  # Asset translation
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
 
-Edit `src/dbt_cloud_demo/defs/dbt_cloud_orchestration/defs.yaml`:
-
-```yaml
-type: dbt_cloud_demo.defs.dbt_cloud_orchestration.component.DbtCloudOrchestrationComponent
-attributes:
-  demo_mode: false
-  account_id: "${DBT_CLOUD_ACCOUNT_ID}"
-  access_url: "https://cloud.getdbt.com"
-  token: "${DBT_CLOUD_TOKEN}"
-  project_id: "${DBT_CLOUD_PROJECT_ID}"
-  environment_id: "${DBT_CLOUD_ENVIRONMENT_ID}"
+  # Automation conditions
   automation_condition_type: "eager"  # Options: "none", "eager", "on_missing", "cron", "on_cron"
-  # Optional: Link external observable assets as upstream dependencies
+  automation_condition_overrides: []
+
+  # Sensor configuration
+  enable_automation_sensor: true  # Creates automation sensor for this instance
+  automation_sensor_name: "dbt_automation_sensor"  # Optional custom name
+  polling_sensor_name: "dbt_polling_sensor"  # Optional custom name
+  automation_sensor_minimum_interval_seconds: 5
+
+  # Observable dependencies (optional)
   has_observable_deps: false
-  observable_dep_keys: []  # Example: ["raw_data.table1", "external_source.table2"]
+  observable_dep_keys: []
+
+requirements:
+  env:
+    - DBT_CLOUD_ACCOUNT_ID
+    - DBT_CLOUD_ACCESS_URL
+    - DBT_CLOUD_TOKEN
+    - DBT_CLOUD_PROJECT_ID
+    - DBT_CLOUD_ENVIRONMENT_ID
 ```
 
-### Set Environment Variables:
+### Multiple Projects Configuration
+
+For orchestrating multiple dbt Cloud projects in one Dagster instance:
+
+```yaml
+# Project 1: Analytics (creates the global automation sensor)
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
+attributes:
+  # Component identity - MUST be unique per instance
+  resource_key: "dbt_cloud_analytics"
+  asset_key_prefix: ["analytics"]  # Namespaces assets as analytics/stg_customers, etc.
+
+  # Connection settings
+  demo_mode: false
+  account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
+  token: "{{ env.DBT_CLOUD_TOKEN }}"
+  project_id: "{{ env.DBT_CLOUD_ANALYTICS_PROJECT_ID }}"
+  environment_id: "{{ env.DBT_CLOUD_ANALYTICS_ENV_ID }}"
+
+  # Asset translation
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
+
+  # Automation
+  automation_condition_type: "eager"
+
+  # Sensor configuration - ONE instance creates the automation sensor
+  enable_automation_sensor: true  # ← Only on ONE instance
+  automation_sensor_name: "global_automation_sensor"
+  polling_sensor_name: "analytics_polling_sensor"
+  automation_sensor_minimum_interval_seconds: 5
+
+  # Observable dependencies
+  has_observable_deps: true
+  observable_dep_keys:
+    - "ingestion.raw_customers"
+    - "ingestion.raw_orders"
+
+requirements:
+  env:
+    - DBT_CLOUD_ACCOUNT_ID
+    - DBT_CLOUD_ACCESS_URL
+    - DBT_CLOUD_TOKEN
+    - DBT_CLOUD_ANALYTICS_PROJECT_ID
+    - DBT_CLOUD_ANALYTICS_ENV_ID
+
+---
+
+# Project 2: Data Warehouse (no automation sensor)
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
+attributes:
+  # Component identity - MUST be unique per instance
+  resource_key: "dbt_cloud_warehouse"
+  asset_key_prefix: ["warehouse"]
+
+  # Connection settings
+  demo_mode: false
+  account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
+  token: "{{ env.DBT_CLOUD_TOKEN }}"
+  project_id: "{{ env.DBT_CLOUD_WAREHOUSE_PROJECT_ID }}"
+  environment_id: "{{ env.DBT_CLOUD_WAREHOUSE_ENV_ID }}"
+
+  # Asset translation
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
+
+  # Automation
+  automation_condition_type: "on_missing"
+
+  # Sensor configuration - NO automation sensor (global one handles all)
+  enable_automation_sensor: false  # ← Don't create redundant sensor
+  polling_sensor_name: "warehouse_polling_sensor"
+
+  # No observable dependencies for this project
+  has_observable_deps: false
+
+requirements:
+  env:
+    - DBT_CLOUD_ACCOUNT_ID
+    - DBT_CLOUD_ACCESS_URL
+    - DBT_CLOUD_TOKEN
+    - DBT_CLOUD_WAREHOUSE_PROJECT_ID
+    - DBT_CLOUD_WAREHOUSE_ENV_ID
+
+---
+
+# Project 3: Reporting (cron-based scheduling)
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
+attributes:
+  # Component identity - MUST be unique per instance
+  resource_key: "dbt_cloud_reporting"
+  asset_key_prefix: ["reporting"]
+
+  # Connection settings
+  demo_mode: false
+  account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
+  token: "{{ env.DBT_CLOUD_TOKEN }}"
+  project_id: "{{ env.DBT_CLOUD_REPORTING_PROJECT_ID }}"
+  environment_id: "{{ env.DBT_CLOUD_REPORTING_ENV_ID }}"
+
+  # Asset translation
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
+
+  # Automation - cron-based
+  automation_condition_type: "on_cron"
+  cron_schedule: "0 6 * * *"  # Daily at 6 AM UTC
+
+  # Sensor configuration
+  enable_automation_sensor: false  # Global sensor handles this too
+  polling_sensor_name: "reporting_polling_sensor"
+
+  # Per-asset overrides
+  automation_condition_overrides:
+    - asset_keys: ["critical_report"]
+      condition_type: "cron"
+      cron_schedule: "0 */4 * * *"  # Every 4 hours
+
+requirements:
+  env:
+    - DBT_CLOUD_ACCOUNT_ID
+    - DBT_CLOUD_ACCESS_URL
+    - DBT_CLOUD_TOKEN
+    - DBT_CLOUD_REPORTING_PROJECT_ID
+    - DBT_CLOUD_REPORTING_ENV_ID
+```
+
+### Environment Variables
+
+Set these environment variables:
 
 ```bash
-export DBT_CLOUD_ACCOUNT_ID="your_account_id"
-export DBT_CLOUD_TOKEN="your_api_token"
-export DBT_CLOUD_PROJECT_ID="your_project_id"
-export DBT_CLOUD_ENVIRONMENT_ID="your_environment_id"
-export DBT_CLOUD_JOB_ID="your_job_id"  # Only for orchestration
+# Shared credentials
+export DBT_CLOUD_ACCOUNT_ID="12345"
+export DBT_CLOUD_ACCESS_URL="https://cloud.getdbt.com"
+export DBT_CLOUD_TOKEN="dbtc_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+
+# Project-specific IDs (example for multiple projects)
+export DBT_CLOUD_ANALYTICS_PROJECT_ID="67890"
+export DBT_CLOUD_ANALYTICS_ENV_ID="11111"
+
+export DBT_CLOUD_WAREHOUSE_PROJECT_ID="67891"
+export DBT_CLOUD_WAREHOUSE_ENV_ID="11112"
+
+export DBT_CLOUD_REPORTING_PROJECT_ID="67892"
+export DBT_CLOUD_REPORTING_ENV_ID="11113"
 ```
 
 ## Validation Commands
@@ -212,20 +367,27 @@ attributes:
 
 ### Example
 
-If you have an observable asset representing a Snowpipe ingestion and a dbt staging model that reads from it:
+If you have an observable asset representing an external data pipeline and a dbt staging model that reads from it:
 
 ```yaml
 observable_dep_keys:
-  - "Observable.observable_POC_NEXGEN_SNOWPIPE_DAILY_POSITION"
+  - "fivetran.sync_customers"
+  - "airbyte.raw_orders"
 ```
 
-The staging model `stg_daily_position` will automatically have the observable asset as an upstream dependency, ensuring proper orchestration order.
+The staging models that reference these sources will automatically have the observable assets as upstream dependencies, ensuring proper orchestration order.
 
 ### Complete Configuration Example
 
 ```yaml
-type: dbt_cloud_demo.defs.dbt_cloud_orchestration.component.DbtCloudOrchestrationComponent
+type: dbt_cloud_demo.defs.dbt_cloud.component.DbtCloudOrchestrationComponent
+
 attributes:
+  # Component identity
+  resource_key: "dbt_cloud_production"
+  asset_key_prefix: ["production"]
+
+  # Connection settings
   demo_mode: false
   account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
   access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
@@ -239,12 +401,18 @@ attributes:
 
   # Automation conditions
   automation_condition_type: "eager"
+
+  # Sensor configuration
+  enable_automation_sensor: true
+  automation_sensor_name: "production_automation_sensor"
+  polling_sensor_name: "production_polling_sensor"
   automation_sensor_minimum_interval_seconds: 5
 
   # Observable dependencies
   has_observable_deps: true
   observable_dep_keys:
-    - "Observable.observable_POC_NEXGEN_SNOWPIPE_DAILY_POSITION"
+    - "external_source.raw_customer_data"
+    - "fivetran.sync_orders"
 
   # Per-asset automation overrides
   automation_condition_overrides:
