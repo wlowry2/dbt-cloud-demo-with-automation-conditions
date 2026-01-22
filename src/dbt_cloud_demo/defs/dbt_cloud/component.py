@@ -110,12 +110,25 @@ class _DbtCloudComponentTranslator(DagsterDbtTranslator):
         automation_condition: Optional[dg.AutomationCondition] = None,
         automation_condition_overrides: Optional[list[AutomationConditionOverride]] = None,
         observable_dep_keys: Optional[list[str]] = None,
+        asset_key_prefix: Optional[list[str]] = None,
     ):
         self._translation_fn = translation_fn
         self._automation_condition = automation_condition
         self._automation_condition_overrides = automation_condition_overrides or []
         self._observable_dep_keys = observable_dep_keys or []
+        self._asset_key_prefix = asset_key_prefix or []
         super().__init__()
+
+    def get_asset_key(self, dbt_resource_props: Mapping[str, Any]) -> dg.AssetKey:
+        """Get asset key with optional prefix for namespacing."""
+        # Get the default asset key from the parent class
+        default_key = super().get_asset_key(dbt_resource_props)
+
+        # If we have a prefix, prepend it to the asset key
+        if self._asset_key_prefix:
+            return dg.AssetKey([*self._asset_key_prefix, *default_key.path])
+
+        return default_key
 
     def get_asset_spec(self, manifest: Mapping[str, Any], unique_id: str, project) -> dg.AssetSpec:
         """Get asset spec, applying translation function and observable dependencies if provided."""
@@ -207,6 +220,10 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
     # Demo mode configuration
     demo_mode: bool = True  # When True, uses local DuckDB instead of dbt Cloud
 
+    # Component configuration
+    resource_key: str = "dbt_cloud"  # Unique resource key for this component instance
+    asset_key_prefix: list[str] = []  # Optional prefix for asset keys (e.g., ["basepoint"] -> basepoint/stg_customers)
+
     # dbt Cloud credentials (not required in demo mode)
     account_id: int = 0
     access_url: str = "https://cloud.getdbt.com"
@@ -281,12 +298,13 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, overrides, and observable deps
+        # Create translator with translation function, automation condition, overrides, observable deps, and asset key prefix
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
             automation_condition_overrides=self.automation_condition_overrides,
-            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else []
+            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else [],
+            asset_key_prefix=self.asset_key_prefix if self.asset_key_prefix else None
         )
 
         # Create dbt Cloud assets that can be materialized
@@ -295,9 +313,11 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
             dagster_dbt_translator=translator,
             name="dbt_cloud_orchestrated_assets",
         )
-        def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext, dbt_cloud: DbtCloudWorkspace):
+        def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext):
             """Materializable dbt Cloud assets triggered by Dagster."""
-            yield from dbt_cloud.cli(args=["build"], context=context).wait(timeout=300)
+            # Get the workspace from resources using the configured resource key
+            dbt_cloud_workspace = getattr(context.resources, self.resource_key)
+            yield from dbt_cloud_workspace.cli(args=["build"], context=context).wait(timeout=300)
 
         # Build polling sensor to monitor job execution
         dbt_cloud_sensor = build_dbt_cloud_polling_sensor(
@@ -316,6 +336,7 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
 
         return dg.Definitions(
             assets=[dbt_cloud_orchestrated_assets],
+            resources={self.resource_key: workspace},
             sensors=sensors
         )
 
@@ -333,12 +354,13 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, overrides, and observable deps
+        # Create translator with translation function, automation condition, overrides, observable deps, and asset key prefix
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
             automation_condition_overrides=self.automation_condition_overrides,
-            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else []
+            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else [],
+            asset_key_prefix=self.asset_key_prefix if self.asset_key_prefix else None
         )
 
         # Create local dbt assets
