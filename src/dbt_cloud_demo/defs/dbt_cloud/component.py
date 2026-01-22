@@ -2,7 +2,13 @@
 
 This module provides:
 - DbtCloudObservabilityComponent: For viewing dbt Cloud assets in Dagster
-- DbtCloudOrchestrationComponent: For orchestrating dbt runs with automation conditions
+- DbtCloudOrchestrationComponent: For orchestrating dbt runs with automation conditions and observable dependencies
+
+Features:
+- Automation conditions (eager, on_missing, cron-based scheduling)
+- Per-asset automation condition overrides
+- Observable asset dependencies for external data sources
+- Demo mode for local development without dbt Cloud credentials
 """
 
 from collections.abc import Mapping
@@ -89,30 +95,58 @@ class AutomationConditionOverride(BaseModel):
 
 
 class _DbtCloudComponentTranslator(DagsterDbtTranslator):
-    """Wrapper translator that applies a translation function to asset specs and automation condition."""
+    """Wrapper translator that applies a translation function to asset specs and automation condition.
+
+    This translator extends the base DagsterDbtTranslator to support:
+    - Custom translation functions for asset spec customization
+    - Automation condition application to dbt assets
+    - Per-asset automation condition overrides
+    - Observable asset dependencies for linking external data sources
+    """
 
     def __init__(
         self,
         translation_fn: Optional[TranslationFn[Mapping[str, Any]]] = None,
         automation_condition: Optional[dg.AutomationCondition] = None,
         automation_condition_overrides: Optional[list[AutomationConditionOverride]] = None,
+        observable_dep_keys: Optional[list[str]] = None,
     ):
         self._translation_fn = translation_fn
         self._automation_condition = automation_condition
         self._automation_condition_overrides = automation_condition_overrides or []
+        self._observable_dep_keys = observable_dep_keys or []
         super().__init__()
 
     def get_asset_spec(self, manifest: Mapping[str, Any], unique_id: str, project) -> dg.AssetSpec:
-        """Get asset spec, applying translation function if provided."""
+        """Get asset spec, applying translation function and observable dependencies if provided."""
         base_spec = super().get_asset_spec(manifest, unique_id, project)
 
-        if self._translation_fn is None:
-            return base_spec
+        # Apply translation function if provided
+        if self._translation_fn is not None:
+            # Extract dbt node properties from manifest
+            dbt_resource_props = manifest["nodes"].get(unique_id) or manifest["sources"].get(unique_id)
+            base_spec = self._translation_fn(base_spec, dbt_resource_props)
 
-        # Extract dbt node properties from manifest
-        dbt_resource_props = manifest["nodes"].get(unique_id) or manifest["sources"].get(unique_id)
+        # Add observable dependencies if configured
+        if self._observable_dep_keys:
+            # Parse observable dep keys (format: "key1.key2.key3" -> AssetKey(["key1", "key2", "key3"]))
+            observable_deps = [dg.AssetKey(key.split(".")) for key in self._observable_dep_keys]
 
-        return self._translation_fn(base_spec, dbt_resource_props)
+            # Add observable deps to the existing deps
+            # Only add to models that reference sources (typically staging models)
+            dbt_resource_props = manifest["nodes"].get(unique_id)
+            if dbt_resource_props and dbt_resource_props.get("resource_type") == "model":
+                # Check if this model has source dependencies
+                depends_on = dbt_resource_props.get("depends_on", {})
+                source_nodes = depends_on.get("nodes", [])
+                has_source_deps = any(node.startswith("source.") for node in source_nodes)
+
+                if has_source_deps:
+                    # Add observable deps to this asset
+                    existing_deps = list(base_spec.deps or [])
+                    base_spec = base_spec.replace_attributes(deps=existing_deps + observable_deps)
+
+        return base_spec
 
     def get_automation_condition(self, dbt_resource_props: Mapping[str, Any]) -> Optional[dg.AutomationCondition]:
         """Return the automation condition for dbt asset, checking for overrides first."""
@@ -154,12 +188,19 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
     - Triggers dbt Cloud jobs from Dagster
     - Applies automation conditions for scheduling
     - Provides a polling sensor to monitor job execution
+    - Supports linking external observable assets as upstream dependencies
 
     In demo mode (demo_mode=True):
     - Uses a bundled demo dbt project with DuckDB
     - Executes dbt locally without requiring dbt Cloud credentials
     - Demonstrates typical dbt patterns (staging, marts, dependencies)
     - Skips cloud-specific features (sensors, cloud workspace)
+
+    Observable Dependencies:
+    - Set has_observable_deps=True to enable linking external observable assets
+    - Specify observable_dep_keys as a list of asset keys (format: "key1.key2.key3")
+    - Observable assets will be added as upstream dependencies to dbt models that reference sources
+    - This creates proper lineage: Observable Asset → dbt Staging Models → dbt Mart Models
 
     """
 
@@ -182,6 +223,10 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
     cron_schedule: str | None = None  # Required if automation_condition_type is "cron" or "on_cron" (uses UTC)
     automation_sensor_minimum_interval_seconds: int = 5  # How often to evaluate automation conditions (minimum 5 seconds)
     automation_condition_overrides: list[AutomationConditionOverride] = []  # Override automation for specific assets
+
+    # Observable dependencies configuration
+    has_observable_deps: bool = False  # Whether this component has external observable dependencies
+    observable_dep_keys: list[str] = []  # List of observable asset keys to add as upstream dependencies (format: "key1.key2.key3")
 
     def _get_demo_project_path(self) -> Path:
         """Get the path to the bundled demo dbt project."""
@@ -236,11 +281,12 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, and overrides
+        # Create translator with translation function, automation condition, overrides, and observable deps
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
-            automation_condition_overrides=self.automation_condition_overrides
+            automation_condition_overrides=self.automation_condition_overrides,
+            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else []
         )
 
         # Create dbt Cloud assets that can be materialized
@@ -288,11 +334,12 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, and overrides
+        # Create translator with translation function, automation condition, overrides, and observable deps
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
-            automation_condition_overrides=self.automation_condition_overrides
+            automation_condition_overrides=self.automation_condition_overrides,
+            observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else []
         )
 
         # Create local dbt assets

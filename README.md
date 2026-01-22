@@ -151,7 +151,10 @@ attributes:
   token: "${DBT_CLOUD_TOKEN}"
   project_id: "${DBT_CLOUD_PROJECT_ID}"
   environment_id: "${DBT_CLOUD_ENVIRONMENT_ID}"
-  job_id: "${DBT_CLOUD_JOB_ID}"
+  automation_condition_type: "eager"  # Options: "none", "eager", "on_missing", "cron", "on_cron"
+  # Optional: Link external observable assets as upstream dependencies
+  has_observable_deps: false
+  observable_dep_keys: []  # Example: ["raw_data.table1", "external_source.table2"]
 ```
 
 ### Set Environment Variables:
@@ -178,6 +181,84 @@ uv run dg materialize <asset_key>
 
 # Start the development server
 uv run dg dev
+```
+
+## Observable Dependencies
+
+The orchestration component supports linking external observable assets (non-dbt assets) as upstream dependencies to dbt models. This is useful when you have:
+- External data ingestion processes that produce assets
+- dbt models that consume this data
+- A need to create proper lineage in the Dagster asset graph
+
+### Configuration
+
+```yaml
+type: dbt_cloud_demo.defs.dbt_cloud_orchestration.component.DbtCloudOrchestrationComponent
+attributes:
+  demo_mode: false
+  # ... other config ...
+  has_observable_deps: true
+  observable_dep_keys:
+    - "raw_data.snowpipe_daily_position"
+    - "external_source.customer_data"
+```
+
+### How It Works
+
+1. Observable assets are specified using dot-notation (e.g., `"key1.key2.key3"` becomes `AssetKey(["key1", "key2", "key3"])`)
+2. The component automatically adds these as upstream dependencies to dbt models that reference sources
+3. This creates proper lineage: **Observable Asset → dbt Staging Models → dbt Mart Models**
+4. Dagster's automation conditions will respect these dependencies when scheduling runs
+
+### Example
+
+If you have an observable asset representing a Snowpipe ingestion and a dbt staging model that reads from it:
+
+```yaml
+observable_dep_keys:
+  - "Observable.observable_POC_NEXGEN_SNOWPIPE_DAILY_POSITION"
+```
+
+The staging model `stg_daily_position` will automatically have the observable asset as an upstream dependency, ensuring proper orchestration order.
+
+### Complete Configuration Example
+
+```yaml
+type: dbt_cloud_demo.defs.dbt_cloud_orchestration.component.DbtCloudOrchestrationComponent
+attributes:
+  demo_mode: false
+  account_id: "{{ env.DBT_CLOUD_ACCOUNT_ID }}"
+  access_url: "{{ env.DBT_CLOUD_ACCESS_URL }}"
+  token: "{{ env.DBT_CLOUD_TOKEN }}"
+  project_id: "{{ env.DBT_CLOUD_PROJECT_ID }}"
+  environment_id: "{{ env.DBT_CLOUD_ENVIRONMENT_ID }}"
+
+  # Asset translation
+  translation:
+    group_name: "{{ node.fqn[1] if node.fqn|length > 1 else 'default' }}"
+
+  # Automation conditions
+  automation_condition_type: "eager"
+  automation_sensor_minimum_interval_seconds: 5
+
+  # Observable dependencies
+  has_observable_deps: true
+  observable_dep_keys:
+    - "Observable.observable_POC_NEXGEN_SNOWPIPE_DAILY_POSITION"
+
+  # Per-asset automation overrides
+  automation_condition_overrides:
+    - asset_keys: ["high_priority_model"]
+      condition_type: "cron"
+      cron_schedule: "0 */4 * * *"  # Every 4 hours
+
+requirements:
+  env:
+    - DBT_CLOUD_ACCOUNT_ID
+    - DBT_CLOUD_ACCESS_URL
+    - DBT_CLOUD_TOKEN
+    - DBT_CLOUD_PROJECT_ID
+    - DBT_CLOUD_ENVIRONMENT_ID
 ```
 
 ## Use Cases
@@ -226,6 +307,25 @@ Both components use Dagster's Component system with:
 - [Dagster Documentation](https://docs.dagster.io/)
 - [Dagster University](https://courses.dagster.io/)
 - [Dagster Slack Community](https://dagster.io/slack)
+
+## Known Issues
+
+### dbt Cloud Manifest Fetch Timeout
+
+When using multiple `DbtCloudOrchestrationComponent` instances, you may encounter a timeout error during definition loading:
+
+```
+Exception: Run 457503924 did not complete within 60 seconds.
+```
+
+**Cause**: Each component instance triggers a dbt Cloud compile run to fetch the manifest. The 60-second timeout is hardcoded in the dagster-dbt library.
+
+**Workarounds**:
+1. Optimize your dbt Cloud project to compile faster (fewer models, simpler dependencies)
+2. Load components sequentially rather than all at once
+3. Request a configurable timeout parameter from the Dagster team
+
+This limitation is in the upstream `dagster-dbt` library and cannot be configured from this component.
 
 ## Support
 
