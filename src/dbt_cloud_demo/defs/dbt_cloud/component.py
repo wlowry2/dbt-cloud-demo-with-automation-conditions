@@ -316,7 +316,6 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
 
         return dg.Definitions(
             assets=[dbt_cloud_orchestrated_assets],
-            resources={"dbt_cloud": workspace},
             sensors=sensors
         )
 
