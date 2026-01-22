@@ -310,22 +310,39 @@ Both components use Dagster's Component system with:
 
 ## Known Issues
 
-### dbt Cloud Manifest Fetch Timeout
+### dbt Cloud Timeout Configuration
 
-When using multiple `DbtCloudOrchestrationComponent` instances, you may encounter a timeout error during definition loading:
+#### Job Execution Timeout
+
+The timeout for dbt Cloud job execution **is configurable**. By default, the component uses a 300-second (5-minute) timeout:
+
+```python
+yield from dbt_cloud.cli(args=["build"], context=context).wait(timeout=300)
+```
+
+You can adjust this in `component.py` line 300 if your dbt jobs require more time.
+
+#### gRPC Startup Timeout
+
+When using multiple dbt Cloud components or large dbt projects, you may encounter a startup timeout:
 
 ```
-Exception: Run 457503924 did not complete within 60 seconds.
+dagster._core.errors.DagsterUserCodeProcessError: Exception: Timed out waiting for gRPC server to start after 180s.
 ```
 
-**Cause**: Each component instance triggers a dbt Cloud compile run to fetch the manifest. The 60-second timeout is hardcoded in the dagster-dbt library.
+**Cause**: During `dagster dev` startup, each dbt Cloud component queries the dbt Cloud API to derive asset specs, which can exceed the default 180-second gRPC startup timeout.
 
-**Workarounds**:
+**Solution**: Increase the startup timeout in `dagster.yaml`:
+
+```yaml
+code_servers:
+  local_startup_timeout: 300  # Increase to 5 minutes (or higher as needed)
+```
+
+**Additional Optimizations**:
 1. Optimize your dbt Cloud project to compile faster (fewer models, simpler dependencies)
-2. Load components sequentially rather than all at once
-3. Request a configurable timeout parameter from the Dagster team
-
-This limitation is in the upstream `dagster-dbt` library and cannot be configured from this component.
+2. Load components sequentially rather than in parallel
+3. Use caching strategies to avoid repeated API calls during development
 
 ## Support
 
