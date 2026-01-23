@@ -94,6 +94,17 @@ class AutomationConditionOverride(BaseModel):
     cron_schedule: Optional[str] = None  # Required if condition_type is "cron" or "on_cron" (uses UTC)
 
 
+class AutomationConditionFilter(BaseModel):
+    """Configuration for filtering which assets get automation conditions based on dbt metadata."""
+
+    include_groups: Optional[list[str]] = None  # Only apply automation to assets in these dbt groups
+    exclude_groups: Optional[list[str]] = None  # Never apply automation to assets in these dbt groups
+    include_tags: Optional[list[str]] = None  # Only apply automation to assets with these dbt tags
+    exclude_tags: Optional[list[str]] = None  # Never apply automation to assets with these dbt tags
+    include_folders: Optional[list[str]] = None  # Only apply automation to assets in these folders (e.g., ["staging", "marts"])
+    exclude_folders: Optional[list[str]] = None  # Never apply automation to assets in these folders
+
+
 class _DbtCloudComponentTranslator(DagsterDbtTranslator):
     """Wrapper translator that applies a translation function to asset specs and automation condition.
 
@@ -109,12 +120,14 @@ class _DbtCloudComponentTranslator(DagsterDbtTranslator):
         translation_fn: Optional[TranslationFn[Mapping[str, Any]]] = None,
         automation_condition: Optional[dg.AutomationCondition] = None,
         automation_condition_overrides: Optional[list[AutomationConditionOverride]] = None,
+        automation_condition_filter: Optional[AutomationConditionFilter] = None,
         observable_dep_keys: Optional[list[str]] = None,
         asset_key_prefix: Optional[list[str]] = None,
     ):
         self._translation_fn = translation_fn
         self._automation_condition = automation_condition
         self._automation_condition_overrides = automation_condition_overrides or []
+        self._automation_condition_filter = automation_condition_filter
         self._observable_dep_keys = observable_dep_keys or []
         self._asset_key_prefix = asset_key_prefix or []
         super().__init__()
@@ -162,18 +175,56 @@ class _DbtCloudComponentTranslator(DagsterDbtTranslator):
         return base_spec
 
     def get_automation_condition(self, dbt_resource_props: Mapping[str, Any]) -> Optional[dg.AutomationCondition]:
-        """Return the automation condition for dbt asset, checking for overrides first."""
+        """Return the automation condition for dbt asset, checking filters and overrides."""
         # Get the asset name from dbt resource properties
         asset_name = dbt_resource_props.get("name", "")
 
-        # Check if this asset has an override
+        # Check if this asset has an override (overrides take precedence over filters)
         for override in self._automation_condition_overrides:
             if asset_name in override.asset_keys:
                 # Build and return the override condition
                 return self._build_condition_from_override(override)
 
-        # No override found, return default automation condition
+        # Check if automation should be filtered out based on dbt metadata
+        if self._automation_condition_filter and not self._passes_automation_filter(dbt_resource_props):
+            # Asset doesn't pass filter, return None (no automation = observable only)
+            return None
+
+        # No override and passes filter (or no filter), return default automation condition
         return self._automation_condition
+
+    def _passes_automation_filter(self, dbt_resource_props: Mapping[str, Any]) -> bool:
+        """Check if asset passes automation condition filters based on dbt metadata."""
+        filter_config = self._automation_condition_filter
+        if not filter_config:
+            return True  # No filter configured, all assets pass
+
+        # Extract dbt metadata
+        asset_group = dbt_resource_props.get("group")  # dbt group
+        asset_tags = dbt_resource_props.get("tags", [])  # dbt tags
+        asset_fqn = dbt_resource_props.get("fqn", [])  # Fully qualified name (path)
+        # Get folder name (second element in fqn, after project name)
+        asset_folder = asset_fqn[1] if len(asset_fqn) > 1 else None
+
+        # Check group filters
+        if filter_config.exclude_groups and asset_group in filter_config.exclude_groups:
+            return False  # Explicitly excluded by group
+        if filter_config.include_groups and asset_group not in filter_config.include_groups:
+            return False  # Not in included groups
+
+        # Check tag filters
+        if filter_config.exclude_tags and any(tag in filter_config.exclude_tags for tag in asset_tags):
+            return False  # Has an excluded tag
+        if filter_config.include_tags and not any(tag in filter_config.include_tags for tag in asset_tags):
+            return False  # Doesn't have any included tags
+
+        # Check folder filters
+        if filter_config.exclude_folders and asset_folder in filter_config.exclude_folders:
+            return False  # In excluded folder
+        if filter_config.include_folders and asset_folder not in filter_config.include_folders:
+            return False  # Not in included folders
+
+        return True  # Passed all filters
 
     def _build_condition_from_override(self, override: AutomationConditionOverride) -> Optional[dg.AutomationCondition]:
         """Build an automation condition from an override configuration."""
@@ -239,6 +290,7 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
     automation_condition_type: str = "none"  # Options: "none", "eager", "on_missing", "cron", "on_cron"
     cron_schedule: str | None = None  # Required if automation_condition_type is "cron" or "on_cron" (uses UTC)
     automation_condition_overrides: list[AutomationConditionOverride] = []  # Override automation for specific assets
+    automation_condition_filter: Optional[AutomationConditionFilter] = None  # Filter which assets get automation based on dbt metadata
 
     # Sensor configuration
     enable_automation_sensor: bool = False  # Set to True to create an automation sensor for this instance
@@ -303,11 +355,12 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, overrides, observable deps, and asset key prefix
+        # Create translator with translation function, automation condition, overrides, filters, observable deps, and asset key prefix
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
             automation_condition_overrides=self.automation_condition_overrides,
+            automation_condition_filter=self.automation_condition_filter,
             observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else [],
             asset_key_prefix=self.asset_key_prefix if self.asset_key_prefix else None
         )
@@ -367,11 +420,12 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Build automation condition
         automation_condition = self._build_automation_condition()
 
-        # Create translator with translation function, automation condition, overrides, observable deps, and asset key prefix
+        # Create translator with translation function, automation condition, overrides, filters, observable deps, and asset key prefix
         translator = _DbtCloudComponentTranslator(
             translation_fn=self.translation,
             automation_condition=automation_condition,
             automation_condition_overrides=self.automation_condition_overrides,
+            automation_condition_filter=self.automation_condition_filter,
             observable_dep_keys=self.observable_dep_keys if self.has_observable_deps else [],
             asset_key_prefix=self.asset_key_prefix if self.asset_key_prefix else None
         )
