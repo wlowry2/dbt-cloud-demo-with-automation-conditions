@@ -46,6 +46,9 @@ class DbtCloudObservabilityComponent(dg.Component, dg.Model, dg.Resolvable):
     project_id: int
     environment_id: int
 
+    # Asset key prefix for namespacing (e.g., ["production"] -> production/customers)
+    asset_key_prefix: list[str] = []
+
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build real dbt Cloud observability definitions."""
         # Validate required parameters
@@ -72,12 +75,24 @@ class DbtCloudObservabilityComponent(dg.Component, dg.Model, dg.Resolvable):
             environment_id=int(self.environment_id)
         )
 
-        # Load asset specs from dbt Cloud
-        asset_specs = load_dbt_cloud_asset_specs(workspace=workspace)
+        # Create translator with asset key prefix if provided
+        # This ensures both asset specs and polling sensor use consistent asset keys
+        translator = None
+        if self.asset_key_prefix:
+            translator = _DbtCloudComponentTranslator(
+                asset_key_prefix=self.asset_key_prefix
+            )
 
-        # Build polling sensor
+        # Load asset specs from dbt Cloud
+        asset_specs = load_dbt_cloud_asset_specs(
+            workspace=workspace,
+            dagster_dbt_translator=translator
+        )
+
+        # Build polling sensor with same translator
         dbt_cloud_sensor = build_dbt_cloud_polling_sensor(
             workspace=workspace,
+            dagster_dbt_translator=translator
         )
 
         return dg.Definitions(
@@ -369,6 +384,13 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Use resource_key to create unique asset definition name per instance
         asset_def_name = f"{self.resource_key}_assets"
 
+        # Capture instance variables in local variables to avoid closure late-binding issues
+        # and ensure consistency across multiple component instances
+        resource_key = self.resource_key
+        enable_automation_sensor = self.enable_automation_sensor
+        automation_sensor_name_config = self.automation_sensor_name
+        automation_sensor_min_interval = self.automation_sensor_minimum_interval_seconds
+
         @dbt_cloud_assets(
             workspace=workspace,
             dagster_dbt_translator=translator,
@@ -376,33 +398,33 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         )
         def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext):
             """Materializable dbt Cloud assets triggered by Dagster."""
-            # Get the workspace from resources using the configured resource key
-            dbt_cloud_workspace = getattr(context.resources, self.resource_key)
+            # Get the workspace from resources using the captured resource key
+            dbt_cloud_workspace = getattr(context.resources, resource_key)
             yield from dbt_cloud_workspace.cli(args=["build"], context=context).wait(timeout=300)
 
         # Build polling sensor to monitor job execution
-        polling_sensor_name = self.polling_sensor_name or f"{self.resource_key}_polling_sensor"
+        # Pass the same translator so sensor uses consistent asset key transformations
         dbt_cloud_sensor = build_dbt_cloud_polling_sensor(
             workspace=workspace,
-            name=polling_sensor_name,
+            dagster_dbt_translator=translator,
         )
 
         # Add automation sensor only if explicitly enabled
         # Note: Only ONE automation sensor is needed per Dagster instance (not per component)
         # Set enable_automation_sensor=True on ONE component instance only
         sensors = [dbt_cloud_sensor]
-        if self.enable_automation_sensor and automation_condition is not None:
-            automation_sensor_name = self.automation_sensor_name or f"{self.resource_key}_automation_sensor"
+        if enable_automation_sensor and automation_condition is not None:
+            automation_sensor_name = automation_sensor_name_config or f"{resource_key}_automation_sensor"
             automation_sensor = dg.AutomationConditionSensorDefinition(
                 name=automation_sensor_name,
                 target="*",  # Evaluates ALL assets across the entire Dagster instance
-                minimum_interval_seconds=self.automation_sensor_minimum_interval_seconds,
+                minimum_interval_seconds=automation_sensor_min_interval,
             )
             sensors.append(automation_sensor)
 
         return dg.Definitions(
             assets=[dbt_cloud_orchestrated_assets],
-            resources={self.resource_key: workspace},
+            resources={resource_key: workspace},
             sensors=sensors
         )
 
@@ -435,6 +457,13 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Use resource_key to create unique asset definition name per instance
         asset_def_name = f"{self.resource_key}_demo_assets"
 
+        # Capture instance variables in local variables to avoid closure late-binding issues
+        # and ensure consistency across multiple component instances
+        resource_key = self.resource_key
+        enable_automation_sensor = self.enable_automation_sensor
+        automation_sensor_name_config = self.automation_sensor_name
+        automation_sensor_min_interval = self.automation_sensor_minimum_interval_seconds
+
         @dbt_assets(
             manifest=dbt_project.manifest_path,
             dagster_dbt_translator=translator,
@@ -452,12 +481,12 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         # Note: Only ONE automation sensor is needed per Dagster instance (not per component)
         # Set enable_automation_sensor=True on ONE component instance only
         sensors = []
-        if self.enable_automation_sensor and automation_condition is not None:
-            automation_sensor_name = self.automation_sensor_name or f"{self.resource_key}_demo_automation_sensor"
+        if enable_automation_sensor and automation_condition is not None:
+            automation_sensor_name = automation_sensor_name_config or f"{resource_key}_demo_automation_sensor"
             automation_sensor = dg.AutomationConditionSensorDefinition(
                 name=automation_sensor_name,
                 target="*",  # Evaluates ALL assets across the entire Dagster instance
-                minimum_interval_seconds=self.automation_sensor_minimum_interval_seconds,
+                minimum_interval_seconds=automation_sensor_min_interval,
             )
             sensors.append(automation_sensor)
 
