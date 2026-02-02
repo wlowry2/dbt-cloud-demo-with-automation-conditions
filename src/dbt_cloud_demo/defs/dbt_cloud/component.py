@@ -398,9 +398,8 @@ class DbtCloudOrchestrationComponent(dg.Component, dg.Model, dg.Resolvable):
         )
         def dbt_cloud_orchestrated_assets(context: dg.AssetExecutionContext):
             """Materializable dbt Cloud assets triggered by Dagster."""
-            # Get the workspace from resources using the captured resource key
-            dbt_cloud_workspace = getattr(context.resources, resource_key)
-            yield from dbt_cloud_workspace.cli(args=["build"], context=context).wait(timeout=300)
+            # Use the workspace from the outer scope (closure) - it's already available
+            yield from workspace.cli(args=["build"], context=context).wait(timeout=300)
 
         # Build polling sensor to monitor job execution
         # Pass the same translator so sensor uses consistent asset key transformations
